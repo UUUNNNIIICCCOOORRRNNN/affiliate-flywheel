@@ -1,4 +1,4 @@
-"""TikTok Affiliate Tracker - Streamlit app (simple version with calendar).
+"""TikTok Affiliate Tracker - Streamlit app (simple, personalised, with calendar).
 
 Run:  streamlit run app.py
 Data is stored locally in tracker.db (SQLite). Works with your existing tracker.db.
@@ -16,32 +16,41 @@ import streamlit as st
 DB_PATH = "tracker.db"
 
 STATUSES = ["Idea", "Ready to Shoot", "Shot", "Editing", "Ready to Post", "Posted"]
-SOURCES = ["Friend's Stock", "Brand/Sample", "Self-Purchased"]
+SHOT_DONE = ["Shot", "Editing", "Ready to Post", "Posted"]
+SOURCES = ["Dini's Stock", "Brand/Sample", "Self-Purchased"]
 BRAND_STATUSES = ["New Contact", "Negotiating", "Deal", "Sample Sent", "Content Made", "Done"]
+PLAN_ACTIVITIES = ["Pick up & shoot", "Shoot", "Edit", "Post"]
 
 CONTENT_COLS = {
     "title": "TEXT", "product": "TEXT", "source": "TEXT", "commission_pct": "REAL",
     "status": "TEXT", "shoot_date": "TEXT", "post_date": "TEXT", "hook": "TEXT",
     "video_link": "TEXT", "edit_minutes": "REAL", "views": "INTEGER",
     "cart_clicks": "INTEGER", "units_sold": "INTEGER", "commission_earned": "REAL",
-    "notes": "TEXT",
+    "notes": "TEXT", "location": "TEXT",
 }
 BRAND_COLS = {
     "name": "TEXT", "contact": "TEXT", "product": "TEXT", "status": "TEXT",
     "fee": "TEXT", "deadline": "TEXT", "notes": "TEXT",
 }
-DATE_COLS = {"content": ["shoot_date", "post_date"], "brands": ["deadline"]}
-TABLE_COLS = {"content": CONTENT_COLS, "brands": BRAND_COLS}
+PLAN_COLS = {
+    "plan_date": "TEXT", "activity": "TEXT", "location": "TEXT", "start_time": "TEXT",
+    "target": "INTEGER", "products": "TEXT", "notes": "TEXT",
+}
+DATE_COLS = {"content": ["shoot_date", "post_date"], "brands": ["deadline"], "plans": ["plan_date"]}
+TABLE_COLS = {"content": CONTENT_COLS, "brands": BRAND_COLS, "plans": PLAN_COLS}
 
+# Friday is a free day. The work happens on the weekend.
 CHECKLIST = [
-    "Friday: pick products and hooks for the weekend shoot",
-    "Saturday-Sunday: shoot the day's products",
+    "Saturday: pick up products at Dini's",
+    "Saturday and Sunday: shoot the products",
     "Sunday night: 15-minute results review",
     "Research 5 new hooks",
 ]
 
-ICON = {"shoot": "🎥", "post": "📤", "posted": "✅", "brand": "🤝"}
-KIND_LABEL = {"shoot": "Shoot", "post": "Post (planned)", "posted": "Posted", "brand": "Brand deadline"}
+ICON = {"plan": "📍", "shoot": "🎥", "post": "📤", "posted": "✅", "brand": "🤝"}
+KIND_LABEL = {"plan": "Day plan", "shoot": "Shoot", "post": "Post (planned)",
+              "posted": "Posted", "brand": "Brand deadline"}
+KIND_ORDER = {"plan": 0, "shoot": 1, "post": 2, "posted": 3, "brand": 4}
 PAGE_SIZE = 15
 
 # ---------- database ----------
@@ -91,6 +100,8 @@ def rows(table):
     for r in data:
         for col in DATE_COLS[table]:
             r[col] = parse_date(r.get(col))
+        if table == "content" and r.get("source") == "Friend's Stock":
+            r["source"] = "Dini's Stock"
     return data
 
 
@@ -150,8 +161,31 @@ def next_status(current, options):
     return None
 
 
-def build_events(videos, brands):
+def split_lines(text):
+    return [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+
+
+def location_options(videos, plans):
+    seen = [x.strip() for x in get_setting("locations", "Dini's place, Home").split(",") if x.strip()]
+    for r in [*plans, *videos]:
+        loc = (r.get("location") or "").strip()
+        if loc and loc not in seen:
+            seen.append(loc)
+    return seen
+
+
+def loc_index(opts, value):
+    return opts.index(value) if value in opts else None
+
+
+def build_events(videos, brands, plans):
     ev = []
+    for p in plans:
+        if p["plan_date"]:
+            label = p["activity"] or "Plan"
+            if p["location"]:
+                label += f" @ {p['location']}"
+            ev.append({"date": p["plan_date"], "kind": "plan", "label": label})
     for v in videos:
         if v["shoot_date"]:
             ev.append({"date": v["shoot_date"], "kind": "shoot", "label": name_of(v)})
@@ -161,7 +195,37 @@ def build_events(videos, brands):
     for b in brands:
         if b["deadline"]:
             ev.append({"date": b["deadline"], "kind": "brand", "label": name_of(b)})
-    return ev
+    return sorted(ev, key=lambda e: KIND_ORDER[e["kind"]])
+
+
+def plan_progress(plan, videos):
+    """Returns (done, label) for shoot/post plans, or None for others."""
+    d = plan["plan_date"]
+    if plan["activity"] in ("Pick up & shoot", "Shoot"):
+        done = sum(1 for v in videos if v["shoot_date"] == d and v["status"] in SHOT_DONE)
+        return done, "shot"
+    if plan["activity"] == "Post":
+        done = sum(1 for v in videos if v["post_date"] == d and v["status"] == "Posted")
+        return done, "posted"
+    return None
+
+
+def show_plan_summary(p, videos):
+    head = f"**{p['activity']}**" + (f" at **{p['location']}**" if p["location"] else "")
+    if p["start_time"]:
+        head += f", {p['start_time']}"
+    st.markdown(head)
+    prog = plan_progress(p, videos)
+    target = int(n(p["target"])) or 1
+    if prog:
+        st.progress(min(prog[0] / target, 1.0), text=f"{prog[0]} of {target} {prog[1]}")
+    else:
+        st.caption(f"Target: {target} videos")
+    items = split_lines(p["products"])
+    if items:
+        st.caption("Products: " + ", ".join(items))
+    if p["notes"]:
+        st.caption(p["notes"])
 
 
 def month_grid_html(year, month, by_day):
@@ -173,6 +237,8 @@ def month_grid_html(year, month, by_day):
         cls = "day"
         if d.month != month:
             cls += " other"
+        elif d.weekday() >= 5:
+            cls += " wkend"
         if d == today:
             cls += " today"
         items = by_day.get(d, [])
@@ -196,11 +262,13 @@ div[data-testid="stMetric"] {
 .dow {text-align: center; font-size: .75rem; opacity: .6; padding: 2px 0;}
 .day {min-height: 92px; border: 1px solid rgba(128,128,128,.3); border-radius: 8px;
       padding: 4px; overflow: hidden; min-width: 0;}
+.day.wkend {background: rgba(13,148,136,.09);}
 .day.other {opacity: .35;}
 .day.today {border: 2px solid #3b82f6;}
 .num {font-size: .78rem; font-weight: 600; margin-bottom: 2px;}
 .chip {font-size: .68rem; color: #fff; border-radius: 4px; padding: 1px 4px; margin-top: 2px;
        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
+.chip.plan {background: #0d9488;}
 .chip.shoot {background: #3b82f6;}
 .chip.post {background: #d97706;}
 .chip.posted {background: #059669;}
@@ -256,8 +324,33 @@ st.session_state.setdefault("vid_limit", PAGE_SIZE)
 
 videos = rows("content")
 brands = rows("brands")
-events = build_events(videos, brands)
+plans = rows("plans")
+events = build_events(videos, brands, plans)
+locs = location_options(videos, plans)
+default_target = int(get_setting("day_target", 3))
 today = date.today()
+
+
+def plan_fields(key, p):
+    """Plan form fields (call inside st.form). Returns the values as a dict."""
+    act = p.get("activity") or PLAN_ACTIVITIES[0]
+    activity = st.radio("What's the plan?", PLAN_ACTIVITIES, horizontal=True,
+                        index=PLAN_ACTIVITIES.index(act) if act in PLAN_ACTIVITIES else 0,
+                        key=f"{key}_act")
+    location = st.selectbox("Where will you take the content?", locs,
+                            index=loc_index(locs, p.get("location")), accept_new_options=True,
+                            placeholder="Choose a place or type a new one", key=f"{key}_loc")
+    c1, c2 = st.columns(2)
+    start = c1.text_input("Time (optional)", p.get("start_time") or "", placeholder="e.g. 10:00",
+                          key=f"{key}_time")
+    target = c2.number_input("Target videos", 1, 50, int(n(p.get("target")) or default_target),
+                             key=f"{key}_tg")
+    products = st.text_area("Products (one per line)", p.get("products") or "", height=90,
+                            placeholder="e.g. Dini's serum\nDini's tote bag", key=f"{key}_pr")
+    notes = st.text_input("Notes (optional)", p.get("notes") or "", key=f"{key}_nt")
+    return {"activity": activity, "location": (location or "").strip(), "start_time": start.strip(),
+            "target": target, "products": products.strip(), "notes": notes.strip()}
+
 
 st.title("🎬 Affiliate Tracker")
 
@@ -286,7 +379,18 @@ with tab_home:
     m3.metric("Commission", rupiah(sum(n(v["commission_earned"]) for v in this_week)))
     m4.metric("Ready to post", sum(1 for v in videos if v["status"] == "Ready to Post"))
 
-    # Things that need attention
+    st.subheader("This weekend")
+    for offset, label in [(5, "Saturday"), (6, "Sunday")]:
+        d = wk_start + timedelta(days=offset)
+        day_plans = [p for p in plans if p["plan_date"] == d]
+        with st.container(border=True):
+            st.markdown(f"**{label}, {d:%d %b}**")
+            if day_plans:
+                for p in day_plans:
+                    show_plan_summary(p, videos)
+            else:
+                st.caption("No plan yet. Add where you'll shoot and how many videos in the Calendar tab.")
+
     overdue = [v for v in videos if v["status"] != "Posted" and v["post_date"] and v["post_date"] < today]
     need_results = [v for v in videos if v["status"] == "Posted" and v["post_date"]
                     and v["post_date"] <= today - timedelta(days=3) and n(v["views"]) == 0]
@@ -300,7 +404,7 @@ with tab_home:
 
     st.subheader("Coming up (next 7 days)")
     upcoming = sorted((e for e in events if today <= e["date"] <= today + timedelta(days=7)),
-                      key=lambda e: e["date"])
+                      key=lambda e: (e["date"], KIND_ORDER[e["kind"]]))
     if upcoming:
         for e in upcoming:
             when = "Today" if e["date"] == today else f"{e['date']:%a %d %b}"
@@ -356,42 +460,71 @@ with tab_cal:
 
     st.markdown(month_grid_html(year, month, by_day), unsafe_allow_html=True)
     st.markdown(
-        "<div class='legend'>"
-        "<span>🎥 Shoot</span><span>📤 Planned post</span>"
-        "<span>✅ Posted</span><span>🤝 Brand deadline</span></div>",
+        "<div class='legend'><span>📍 Day plan</span><span>🎥 Shoot</span><span>📤 Planned post</span>"
+        "<span>✅ Posted</span><span>🤝 Brand deadline</span><span>Shaded = weekend</span></div>",
         unsafe_allow_html=True)
 
     st.subheader("Day details")
     sel = st.date_input("Pick a day", value=today, key="sel_day", format="DD/MM/YYYY")
-    day_events = by_day.get(sel, [])
-    if day_events:
-        for e in day_events:
-            st.markdown(f"{ICON[e['kind']]} **{e['label']}** "
-                        f"<span style='opacity:.6'>({KIND_LABEL[e['kind']]})</span>",
-                        unsafe_allow_html=True)
-    else:
-        st.caption("Nothing planned for this day.")
 
-    with st.expander(f"➕ Plan something on {sel:%a %d %b}"):
-        with st.form("cal_add", clear_on_submit=True):
-            what = st.radio("What is happening?", ["Shoot", "Post"], horizontal=True)
-            names = {v["id"]: name_of(v) for v in videos if v["status"] != "Posted"}
-            pick = st.selectbox("Video", [None] + list(names),
-                                format_func=lambda i: "New video" if i is None else names[i])
-            new_title = st.text_input("Title (only for a new video)")
-            if st.form_submit_button("Add to calendar", type="primary", width="stretch"):
-                field = "shoot_date" if what == "Shoot" else "post_date"
-                if pick is not None:
-                    update("content", pick, {field: sel})
+    day_plans = [p for p in plans if p["plan_date"] == sel]
+    other_events = [e for e in by_day.get(sel, []) if e["kind"] != "plan"]
+    if not day_plans and not other_events:
+        st.caption("Nothing planned for this day yet.")
+
+    for p in day_plans:
+        pid = p["id"]
+        with st.container(border=True):
+            show_plan_summary(p, videos)
+            with st.expander("Edit this plan"):
+                with st.form(f"plan_edit_{pid}"):
+                    vals = plan_fields(f"pe{pid}", p)
+                    confirm = st.checkbox("Yes, delete this plan", key=f"pdel{pid}")
+                    sc, dc = st.columns(2)
+                    saved = sc.form_submit_button("Save changes", type="primary", width="stretch")
+                    deleted = dc.form_submit_button("Delete", width="stretch")
+                if saved:
+                    update("plans", pid, vals)
                     st.rerun()
-                elif new_title.strip():
-                    insert("content", {
-                        "title": new_title.strip(), field: sel,
-                        "status": "Ready to Shoot" if what == "Shoot" else "Ready to Post",
-                    })
+                if deleted:
+                    if confirm:
+                        delete("plans", pid)
+                        st.rerun()
+                    else:
+                        st.error("Tick the box first to confirm the delete.")
+
+    for e in other_events:
+        st.markdown(f"{ICON[e['kind']]} **{e['label']}** "
+                    f"<span style='opacity:.6'>({KIND_LABEL[e['kind']]})</span>",
+                    unsafe_allow_html=True)
+
+    with st.expander(f"📍 Plan {sel:%A %d %b}", expanded=not day_plans and sel.weekday() >= 5):
+        with st.form("plan_add", clear_on_submit=True):
+            first_activity = "Pick up & shoot" if sel.weekday() >= 5 else "Post"
+            vals = plan_fields(f"padd_{sel.isoformat()}", {"activity": first_activity})
+            make = st.checkbox("Create a video for each product", value=True, key="padd_make")
+            if st.form_submit_button("Save plan", type="primary", width="stretch"):
+                insert("plans", {"plan_date": sel, **vals})
+                if make and vals["activity"] in ("Pick up & shoot", "Shoot"):
+                    for line in split_lines(vals["products"]):
+                        insert("content", {
+                            "product": line, "status": "Ready to Shoot", "shoot_date": sel,
+                            "location": vals["location"],
+                            "source": "Dini's Stock" if vals["activity"] == "Pick up & shoot" else None,
+                        })
+                st.rerun()
+
+    unposted = {v["id"]: name_of(v) for v in videos if v["status"] != "Posted"}
+    with st.expander("Add an existing video to this day"):
+        if not unposted:
+            st.caption("No unposted videos yet. Create some with the plan above or in the Videos tab.")
+        else:
+            with st.form("cal_move", clear_on_submit=True):
+                what = st.radio("On this day I will", ["Shoot it", "Post it"], horizontal=True)
+                pick = st.selectbox("Video", list(unposted), format_func=lambda i: unposted[i])
+                if st.form_submit_button("Add to this day", type="primary", width="stretch"):
+                    update("content", pick, {"shoot_date" if what == "Shoot it" else "post_date": sel})
                     st.rerun()
-                else:
-                    st.error("Pick a video or type a title for a new one.")
 
 # =====================================================================
 # VIDEOS
@@ -401,7 +534,12 @@ with tab_videos:
         with st.form("add_video", clear_on_submit=True):
             title = st.text_input("Title")
             product = st.text_input("Product")
-            status = st.selectbox("Status", STATUSES)
+            s1, s2 = st.columns(2)
+            status = s1.selectbox("Status", STATUSES)
+            source = s2.selectbox("Product source", SOURCES)
+            location = st.selectbox("Where will you shoot it?", locs, index=None,
+                                    accept_new_options=True, placeholder="Choose a place or type a new one",
+                                    key="new_loc")
             d1, d2 = st.columns(2)
             shoot = d1.date_input("Shoot date", value=None, key="new_shoot")
             post = d2.date_input("Post date", value=None, key="new_post")
@@ -412,6 +550,7 @@ with tab_videos:
                 else:
                     insert("content", {
                         "title": title.strip(), "product": product.strip(), "status": status,
+                        "source": source, "location": (location or "").strip(),
                         "shoot_date": shoot, "post_date": post, "hook": hook.strip(),
                     })
                     st.rerun()
@@ -442,6 +581,8 @@ with tab_videos:
                 meta.append(v["product"])
             if v["shoot_date"]:
                 meta.append(f"Shoot {v['shoot_date']:%d %b}")
+            if v["location"]:
+                meta.append(f"📍 {v['location']}")
             if v["post_date"]:
                 meta.append(f"Post {v['post_date']:%d %b}")
             if meta:
@@ -464,6 +605,9 @@ with tab_videos:
                     e_source = s2.selectbox(
                         "Product source", SOURCES,
                         index=SOURCES.index(v["source"]) if v["source"] in SOURCES else 0)
+                    e_loc = st.selectbox("Where will you shoot it?", locs,
+                                         index=loc_index(locs, v["location"]), accept_new_options=True,
+                                         placeholder="Choose a place or type a new one", key=f"loc{vid}")
                     d1, d2 = st.columns(2)
                     e_shoot = d1.date_input("Shoot date", value=v["shoot_date"], key=f"sh{vid}")
                     e_post = d2.date_input("Post date", value=v["post_date"], key=f"po{vid}")
@@ -493,7 +637,8 @@ with tab_videos:
                         e_post = today
                     update("content", vid, {
                         "title": e_title.strip(), "product": e_product.strip(), "status": e_status,
-                        "source": e_source, "shoot_date": e_shoot, "post_date": e_post,
+                        "source": e_source, "location": (e_loc or "").strip(),
+                        "shoot_date": e_shoot, "post_date": e_post,
                         "hook": e_hook.strip(), "video_link": e_link.strip(), "commission_pct": e_pct,
                         "notes": e_notes.strip(), "views": e_views, "cart_clicks": e_clicks,
                         "units_sold": e_sold, "commission_earned": e_comm, "edit_minutes": e_edit,
@@ -585,20 +730,27 @@ with tab_brands:
 # SETTINGS
 # =====================================================================
 with tab_settings:
-    st.subheader("Weekly target")
-    new_target = st.number_input("Videos to post per week", min_value=1, max_value=50,
+    st.subheader("My targets")
+    t1, t2 = st.columns(2)
+    new_target = t1.number_input("Videos to post per week", min_value=1, max_value=50,
                                  value=int(get_setting("weekly_target", 6)))
-    if st.button("Save target", type="primary"):
+    new_day_target = t2.number_input("Videos to shoot per shoot day", min_value=1, max_value=50,
+                                     value=default_target)
+    new_locs = st.text_input("My usual places to shoot (separate with commas)",
+                             value=get_setting("locations", "Dini's place, Home"))
+    if st.button("Save settings", type="primary"):
         set_setting("weekly_target", new_target)
-        st.toast("Target saved")
+        set_setting("day_target", new_day_target)
+        set_setting("locations", new_locs)
+        st.toast("Settings saved")
         st.rerun()
     st.caption("Suggested ramp: 6-8 videos in weeks 1-2, then 10 once editing keeps up.")
 
     st.subheader("Backup")
-    c1, c2 = st.columns(2)
-    c1.download_button("Download videos (CSV)",
-                       pd.DataFrame(videos).to_csv(index=False).encode("utf-8"),
+    c1, c2, c3 = st.columns(3)
+    c1.download_button("Videos (CSV)", pd.DataFrame(videos).to_csv(index=False).encode("utf-8"),
                        file_name="content_backup.csv", mime="text/csv", width="stretch")
-    c2.download_button("Download brands (CSV)",
-                       pd.DataFrame(brands).to_csv(index=False).encode("utf-8"),
+    c2.download_button("Brands (CSV)", pd.DataFrame(brands).to_csv(index=False).encode("utf-8"),
                        file_name="brands_backup.csv", mime="text/csv", width="stretch")
+    c3.download_button("Day plans (CSV)", pd.DataFrame(plans).to_csv(index=False).encode("utf-8"),
+                       file_name="plans_backup.csv", mime="text/csv", width="stretch")
