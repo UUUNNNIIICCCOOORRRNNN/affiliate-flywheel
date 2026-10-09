@@ -352,7 +352,7 @@ def plan_fields(key, p):
             "target": target, "products": products.strip(), "notes": notes.strip()}
 
 
-st.title("🎬 Affiliate Tracker")
+st.title("♡ Affiliate Tracker")
 
 tab_home, tab_cal, tab_videos, tab_brands, tab_settings = st.tabs(
     ["Home", "Calendar", "Videos", "Brands", "Settings"])
