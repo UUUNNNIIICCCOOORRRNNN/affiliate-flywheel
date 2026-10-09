@@ -314,7 +314,7 @@ def go_today():
 
 # ---------- app ----------
 
-st.set_page_config(page_title="Affiliate Tracker", page_icon="🎬", layout="wide",
+st.set_page_config(page_title="Affiliate Tracker", page_icon="♡", layout="wide",
                    initial_sidebar_state="collapsed")
 st.markdown(CSS, unsafe_allow_html=True)
 init_db()
